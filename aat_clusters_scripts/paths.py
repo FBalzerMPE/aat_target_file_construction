@@ -18,7 +18,8 @@ class PathProvider:
         self.white_dwarfs_edr = self.obs_setup.joinpath(
             "gaiaedr3_wd_main.fits")
         self.white_dwarfs_jacob = self.obs_setup.joinpath("WD_gaia.fits")
-        self.sky_fibres = self.obs_setup.joinpath("sky.sep_feb22.fit")
+        # self.sky_fibres = self.obs_setup.joinpath("sky.sep_feb22.fit")
+        self.sky_fibres = self.obs_setup.joinpath("SkyFibers.csv")
 
     def read_table(self, path: Path):
         """Convenience function to read an astropy table while filtering out warnings."""
@@ -26,3 +27,6 @@ class PathProvider:
             warnings.simplefilter("ignore", UnitsWarning)
             t = Table.read(path)
         return t
+
+
+PATHS = PathProvider()
