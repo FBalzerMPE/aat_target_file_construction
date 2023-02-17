@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -14,6 +14,7 @@ from .helper_functions import (add_ra_dec_hms_dms_columns, calc_pm_tot,
                                filter_for_existing_cols, filter_for_stars,
                                get_objects_in_circular_region)
 from .paths import PATHS
+from .region import RectangularRegion
 
 ##############################
 # - Science targets:
@@ -72,6 +73,16 @@ def _sanitize_simbad_table(table: Table) -> Table:
     return table
 
 
+def _sanitize_sweep_for_guide_stars(table: Table) -> Table:
+    # Filter for pointlike objects:
+    table = table["type"] == "PSF"
+    table.rename_columns(cols := table.colnames, [col.lower() for col in cols])
+    table.rename_column("gaia_phot_rp_mean_mag", "rmag")
+    table["obj_name"] = [f"G_{objid}" for objid in table["ref_id"]]
+    relevant_cols = ["obj_name", "ra", "dec", "pmra", "pmdec", "rmag"]
+    return table[relevant_cols]
+
+
 def _retrieve_simbad_table(ra: float, dec: float, radius: float = 1) -> Table:
     """Retrieve the simbad sources around the given central `ra` and `dec` within
     the provided `radius` (in deg).
@@ -87,6 +98,29 @@ def _retrieve_simbad_table(ra: float, dec: float, radius: float = 1) -> Table:
 
 ###########################
 # - Sky fibres:
+
+
+def _generate_sky_fibres_from_sweep(table: Table) -> Table:
+    num_initial_points = 15000
+    random_ra = np.random.uniform(
+        np.min(table["ra"]), np.max(table["ra"]), num_initial_points)
+    random_dec = np.random.uniform(
+        np.min(table["dec"]), np.max(table["dec"]), num_initial_points)
+    random_coords = SkyCoord(random_ra, random_dec, unit="deg")
+    sweep_coords = SkyCoord(table["ra"], table["dec"])
+    # Find all random coords far away from sweep sources
+    idx, d2d, _ = random_coords.match_to_catalog_sky(sweep_coords)
+    min_distance_to_others = 10 * u.arcsec
+    sky_fibres = random_coords[d2d > min_distance_to_others]
+
+    # Find all random coords far away from each other to prevent clustering:
+    idx, d2d, _ = sky_fibres.match_to_catalog_sky(sky_fibres, nthneighbor=2)
+    min_distance_to_others = 1 * u.arcmin
+    sky_fibres = sky_fibres[d2d > min_distance_to_others]
+    sky_fibres = Table([sky_fibres.ra, sky_fibres.dec], names=["ra", "dec"])
+    # Limit them to the same circular extent:
+    sky_fibres = get_objects_in_circular_region(sky_fibres)
+    return sky_fibres
 
 
 def _sanitize_fibre_table(table: Table) -> Table:
@@ -135,11 +169,16 @@ class TargetContainer:
     obs_ra: float
     obs_dec: float
     selection_radius: float = 1.0  # The radius in degrees
+    region: RectangularRegion = field(init=False)
     cluster_members: Optional[Table] = None
     agn_candidates: Optional[Table] = None
     white_dwarfs: Optional[Table] = None
     guide_stars: Optional[Table] = None
     sky_fibres: Optional[Table] = None
+
+    def __post_init__(self):
+        self.region = RectangularRegion.from_centre_and_radius(
+            self.obs_ra, self.obs_dec, self.selection_radius)
 
     def __getitem__(self, key):
         return self.__getattribute__(key)
@@ -229,11 +268,11 @@ class TargetContainer:
         white_dwarfs = white_dwarfs[brightness_mask]
         count_faint = len(white_dwarfs)
 
-        # - Select the three white dwarfs closest to the median magnitude of our sources
+        # - Select the 10 white dwarfs closest to the median magnitude of our sources
         white_dwarfs.sort("rmag")
         median_mag = np.median(self.cluster_members["rmag"])
         closest_index = np.abs(white_dwarfs["rmag"] - median_mag).argmin()
-        good_white_dwarfs = white_dwarfs[closest_index:closest_index + 3]
+        good_white_dwarfs = white_dwarfs[closest_index:closest_index + 10]
 
         count_good = len(good_white_dwarfs)
 
@@ -265,52 +304,53 @@ class TargetContainer:
         verbose : bool, optional
             Whether additional information on the selection should be printed, by default True
         """
-        simbad_sources = _retrieve_simbad_table(
+        sweep = self.region.get_included_sweep_table()
+        sweep = get_objects_in_circular_region(
             self.obs_ra, self.obs_dec, self.selection_radius)
-        # Rename the columns and convert ra and dec to skycoord:
-        simbad_sources = _sanitize_simbad_table(simbad_sources)
-        simbad_sources["pm_tot"] = calc_pm_tot(
-            simbad_sources["pmra"], simbad_sources["pmdec"])
-        count_initial = len(simbad_sources)
+        # ! Note: We renamed RPmag to rmag for consistency with the other tables!
+        guide_stars = _sanitize_sweep_for_guide_stars(sweep)
+
+        guide_stars["pm_tot"] = calc_pm_tot(
+            guide_stars["pmra"], guide_stars["pmdec"])
+        count_initial = len(guide_stars)
         # Discard all rows where no rmag, pmra or pmdec information is available:
-        simbad_sources = filter_for_existing_cols(
-            simbad_sources, ("rmag", "pmra", "pmdec"))
-        count_clean = len(simbad_sources)
+        guide_stars = filter_for_existing_cols(
+            guide_stars, ("rmag", "pmra", "pmdec"))
+        count_clean = len(guide_stars)
         # Perform the desired brightness cuts
-        mask = simbad_sources["rmag"] <= mag_r_max
-        mask &= simbad_sources["rmag"] >= mag_r_min
-        mask &= simbad_sources["pm_tot"] <= pm_max
-        simbad_sources = simbad_sources[mask]
-        count_flux_limited = len(simbad_sources)
-        # Discard all sources that are not guide stars
-        simbad_sources = filter_for_stars(simbad_sources)
-        count_stars_only = len(simbad_sources)
-        self.guide_stars = simbad_sources
+        mask = guide_stars["rmag"] <= mag_r_max
+        mask &= guide_stars["rmag"] >= mag_r_min
+        mask &= guide_stars["pm_tot"] <= pm_max
+        guide_stars = guide_stars[mask]
+        count_flux_limited = len(guide_stars)
+
+        self.guide_stars = guide_stars
         print(
-            f"[{self.container_id}] {count_stars_only} guide stars have been registered.")
+            f"[{self.container_id}] {count_flux_limited} guide stars have been registered.")
         if not verbose:
             return
         info_string = f"\t{count_initial = }\n\t{count_clean = }\n"
-        info_string += f"\t{count_flux_limited = }\n\t{count_stars_only = }"
+        info_string += f"\t{count_flux_limited = }"
         print(info_string)
 
     def get_sky_fibres(self, verbose=True):
-        sky_fibres = PATHS.read_table(PATHS.sky_fibres)
-        sky_fibres = _sanitize_fibre_table(sky_fibres)
-        count_initial = len(sky_fibres)
-        # Restrict to circular region around pointing:
-        sky_fibres = get_objects_in_circular_region(
-            sky_fibres, self.obs_ra, self.obs_dec, self.selection_radius)
-        count_in_region = len(sky_fibres)
+        """Generate 200 random sky fibres from the legacy DR10 imaging"""
+        sweep = self.region.get_included_sweep_table()
+        sweep = get_objects_in_circular_region(
+            self.obs_ra, self.obs_dec, self.selection_radius)
 
-        # TODO: Perform random selection and exclude fibers that are close to each other!
+        sky_fibres = _generate_sky_fibres_from_sweep(sweep)
+        count_initial = len(sky_fibres)
+        limiting_count = 150
+        sky_fibres = sky_fibres[:150]
+        sky_fibres = _sanitize_fibre_table(sky_fibres)
         self.sky_fibres = sky_fibres
 
         print(
-            f"[{self.container_id}] {count_in_region} sky fibres have been registered.")
+            f"[{self.container_id}] {limiting_count} sky fibres have been registered.")
         if not verbose:
             return
-        info_string = f"\t{count_initial = }\n\t{count_in_region = }"
+        info_string = f"\t{count_initial = }\n\t{limiting_count = }"
         print(info_string)
 
     def plot_sources_on_ax(self, ax: Axes, **kwargs):
@@ -365,7 +405,12 @@ class TargetContainer:
         ra, dec = convert_radec_to_hmsdms(
             self.obs_ra, self.obs_dec, " ", precision=2)
         file_header = (f"LABEL {label}\nUTDATE {utdate}\nCENTRE {ra} {dec}\nEQUINOX J2000\n"
-                       f"WLEN1 6000\nPROPER_MOTIONS")
+                       f"WLEN1 6000\nPROPER_MOTIONS\n\n")
+        file_header += ("""
+# Proper motions in arcsec/year
+
+#			  R. Ascention 	 Declination			      Prog    Proper Motion		Comments
+# Name 			  hh  mm ss.sss  dd  mm ss.sss 		      mag     ID      ra	dec\n""")
         return file_header
 
     def write_targets_to_disc(self, fpath: Optional[Path] = None, overwrite=True):
@@ -377,6 +422,6 @@ class TargetContainer:
         header = self.get_fld_file_header()
         # Now that the file has been written, we have to prepend the file header:
         with open(fpath, 'r+', encoding="utf8") as f:
-            content = f.read()
+            content = f.readlines()
             f.seek(0, 0)
-            f.write(header + '\n\n# ' + content)
+            f.write(header + "".join(content[1:]))

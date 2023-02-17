@@ -6,6 +6,7 @@ import astropy.units as u
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
+from IPython.display import HTML, display
 
 
 def convert_radec_to_hmsdms(ra: float, dec: float,
@@ -139,3 +140,47 @@ def filter_for_stars(object_table: Table, more_star_names: Optional[Sequence[str
 def calc_pm_tot(pmra: float, pmdec: float) -> float:
     """Calculate the total proper motion of a given source according to Jacob's formula"""
     return np.sqrt((0.3977 * pmra)**2 + pmdec**2)
+
+
+def display_html_site(url: str, width: float = 800, height: float = 600, provide_link: bool = False,
+                      additional_text=""):
+    """Displays the given url in the jupyter notebook
+
+    Parameters
+    ----------
+    url : str
+        The link of the requested page
+    width : float, optional
+        The width of the frame, by default 800
+    height : float, optional
+        The height of the frame, by default 600
+    """
+    output_string = _get_html_image_string(
+        url, width, height) + additional_text
+    if provide_link:
+        link = f"<a href={url}>LINK</a><br>"
+        output_string = link + output_string
+    display(HTML(output_string))
+
+
+def _get_html_image_string(source: str, width: float = 600, height: float = 600) -> str:
+    """Get the HTML frame for a given source (local image or url)
+
+    Parameters
+    ----------
+    source : str
+        The path to the image source
+    width : float, optional
+        The width of the image, by default 600
+    height : float, optional
+        The height of the image, by default 600
+
+    Returns
+    -------
+    str
+        The image enclosed in iframe html tags
+    """
+    is_url = source.startswith("http")
+    tag = "iframe" if is_url else "img"
+    width_height = f' width="{width}" height="{height}"' if is_url else f' width="{width}"'
+    return f'<{tag} src="{source}"{width_height}></{tag}>'
