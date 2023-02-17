@@ -14,6 +14,7 @@ class PathProvider:
         self.obs_setup = self.data.joinpath("observation_setup")
         self.members = self.obs_setup.joinpath(
             "aat_observation_member_selection.fit")
+        self.agn_candidates = self.obs_setup.joinpath("AGN_cluster123.fits")
         self.clusters = self.obs_setup.joinpath("aat_observation_clusters.fit")
         self.white_dwarfs_edr = self.obs_setup.joinpath(
             "gaiaedr3_wd_main.fits")
@@ -27,6 +28,9 @@ class PathProvider:
             warnings.simplefilter("ignore", UnitsWarning)
             t = Table.read(path)
         return t
+
+    def get_fld_fname(self, cluster_id: int) -> Path:
+        return self.obs_setup.joinpath(f"target_catalog_{cluster_id}.fld")
 
 
 PATHS = PathProvider()

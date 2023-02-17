@@ -1,16 +1,47 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Optional
 
 import astropy.units as u
+import numpy as np
 from astropy.coordinates import SkyCoord
-from astropy.table import Column, Table, vstack
+from astropy.table import Table, unique, vstack
 from astroquery.simbad import Simbad
 from matplotlib.axes import Axes
 
 from .helper_functions import (add_ra_dec_hms_dms_columns, calc_pm_tot,
+                               convert_radec_to_hmsdms,
                                filter_for_existing_cols, filter_for_stars,
                                get_objects_in_circular_region)
 from .paths import PATHS
+
+##############################
+# - Science targets:
+
+
+def _sanitize_cluster_members(member_table: Table) -> Table:
+    """Retrieve the vital information for all members associated with this cluster id"""
+    member_table["obj_name"] = [
+        f"erosource_{member['id']}" for member in member_table]
+    # The magnitudes are given as triplets in the [mag] column (as grz), so we select the middle one:
+    member_table["rmag"] = member_table["mag"][:, 1]
+    # Since we're observing galaxies, their proper motions are 0:
+    member_table["pmra"] = 0
+    member_table["pmdec"] = 0
+    relevant_cols = ["ra", "dec", "obj_name", "rmag", "pmra", "pmdec"]
+    return member_table[relevant_cols]
+
+
+def _sanitize_agn_candidates(agn_table: Table) -> Table:
+    """Retrieve the vital information for all agn for this observation"""
+    old_names = ["ERO_ID", "LS10_RA", "LS10_DEC", "RMAG"]
+    new_names = ["obj_name", "ra", "dec", "rmag"]
+    agn_table.rename_columns(old_names, new_names)
+    # Since we're observing galaxies, their proper motions are 0:
+    agn_table["pmra"] = 0
+    agn_table["pmdec"] = 0
+    relevant_cols = ["ra", "dec", "obj_name", "rmag", "pmra", "pmdec"]
+    return agn_table[relevant_cols]
 
 ########################
 # - White dwarfs:
@@ -70,28 +101,21 @@ def _sanitize_fibre_table(table: Table) -> Table:
     table["pmdec"] = 0
     return table
 
-##############################
-# - Science targets:
-
-
-def _sanitize_science_targets(member_table: Table) -> Table:
-    """Retrieve the vital information for all members associated with this cluster id"""
-    member_table["obj_name"] = [
-        f"erosource_{member['id']}" for member in member_table]
-    # The magnitudes are given as triplets in the [mag] column (as grz), so we select the middle one:
-    member_table["rmag"] = member_table["mag"][:, 1]
-    # Since we're observing galaxies, their proper motions are 0:
-    member_table["pmra"] = 0
-    member_table["pmdec"] = 0
-    relevant_cols = ["ra", "dec", "obj_name", "rmag", "pmra", "pmdec"]
-    return member_table[relevant_cols]
-
 
 #####################
 # - Adding information
+
+@np.vectorize
+def _clean_object_name(name: str) -> str:
+    if isinstance(name, bytes):
+        name = name.decode("utf-8")
+    return name.replace(" ", "_")
+
+
 def _sanitize_table_for_observation(table, obs_type: Literal["P", "S", "F"], priority=9) -> Table:
     # [P = 'Science targets', F = 'Guide stars', S = 'Sky fibres']
     assert obs_type in "PSF", f"Please choose a valid observation type and not {obs_type}"
+    table["obj_name"] = _clean_object_name(table["obj_name"])
     table["obs_type"] = obs_type
     table["priority"] = priority
     # The program ID does not matter for us, but we need to provide it
@@ -111,7 +135,8 @@ class TargetContainer:
     obs_ra: float
     obs_dec: float
     selection_radius: float = 1.0  # The radius in degrees
-    science_targets: Optional[Table] = None
+    cluster_members: Optional[Table] = None
+    agn_candidates: Optional[Table] = None
     white_dwarfs: Optional[Table] = None
     guide_stars: Optional[Table] = None
     sky_fibres: Optional[Table] = None
@@ -124,15 +149,15 @@ class TargetContainer:
 
     def get_available_tables(self) -> dict[str, Table]:
         """Get all of the currently available tables."""
-        keys = ["science_targets", "white_dwarfs",
+        keys = ["cluster_members", "agn_candidates", "white_dwarfs",
                 "guide_stars", "sky_fibres"]
         return {key: table for key in keys if (table := self[key]) is not None}
 
-    def get_science_targets(self, mag_r_min=17.5, verbose=True):
+    def get_cluster_members(self, mag_r_min=17.5, verbose=True):
         members = Table.read(PATHS.members)
         # This selection only works due to our setup:
         members = members[members["mem_match_id"] == self.container_id]
-        members = _sanitize_science_targets(members)
+        members = _sanitize_cluster_members(members)
         count_initial = len(members)
         # Discard all rows where no rmag, pmra or pmdec information is available:
         members = filter_for_existing_cols(members)
@@ -142,12 +167,34 @@ class TargetContainer:
         members = members[brightness_cut]
         count_brightness_cut = len(members)
 
-        self.science_targets = members
+        self.cluster_members = members
         print(
             f"[{self.container_id}] {count_brightness_cut} science targets (cluster members) have been registered.")
         if not verbose:
             return
         info_string = f"\t{count_initial = }\n\t{count_clean = }"
+        info_string += f"\n\t{count_brightness_cut = }"
+        print(info_string)
+
+    def get_agn(self, verbose=True):
+        agn_candidates = PATHS.read_table(PATHS.agn_candidates)
+        agn_candidates = _sanitize_agn_candidates(agn_candidates)
+        count_initial = len(agn_candidates)
+        # Restrict to circular region around pointing:
+        agn_candidates = get_objects_in_circular_region(
+            agn_candidates, self.obs_ra, self.obs_dec, self.selection_radius)
+        count_in_region = len(agn_candidates)
+        mask = agn_candidates["rmag"] >= 17.5
+        mask &= agn_candidates["rmag"] <= 21.5
+        agn_candidates = agn_candidates[mask]
+        count_brightness_cut = len(agn_candidates)
+
+        self.agn_candidates = agn_candidates
+        print(
+            f"[{self.container_id}] {count_brightness_cut} more science targets (AGN) have been registered.")
+        if not verbose:
+            return
+        info_string = f"\t{count_initial = }\n\t{count_in_region = }"
         info_string += f"\n\t{count_brightness_cut = }"
         print(info_string)
 
@@ -181,9 +228,18 @@ class TargetContainer:
         brightness_mask = white_dwarfs["rmag"] >= mag_r_min
         white_dwarfs = white_dwarfs[brightness_mask]
         count_faint = len(white_dwarfs)
-        self.white_dwarfs = white_dwarfs
+
+        # - Select the three white dwarfs closest to the median magnitude of our sources
+        white_dwarfs.sort("rmag")
+        median_mag = np.median(self.cluster_members["rmag"])
+        closest_index = np.abs(white_dwarfs["rmag"] - median_mag).argmin()
+        good_white_dwarfs = white_dwarfs[closest_index:closest_index + 3]
+
+        count_good = len(good_white_dwarfs)
+
+        self.white_dwarfs = good_white_dwarfs
         print(
-            f"[{self.container_id}] {count_faint} white dwarfs have been registered.")
+            f"[{self.container_id}] {count_good} white dwarfs have been registered.")
         if not verbose:
             return
         info_string = f"\t{count_initial = }\n\t{count_in_region = }\n"
@@ -224,6 +280,7 @@ class TargetContainer:
         mask = simbad_sources["rmag"] <= mag_r_max
         mask &= simbad_sources["rmag"] >= mag_r_min
         mask &= simbad_sources["pm_tot"] <= pm_max
+        simbad_sources = simbad_sources[mask]
         count_flux_limited = len(simbad_sources)
         # Discard all sources that are not guide stars
         simbad_sources = filter_for_stars(simbad_sources)
@@ -257,13 +314,13 @@ class TargetContainer:
         print(info_string)
 
     def plot_sources_on_ax(self, ax: Axes, **kwargs):
-        labels = ["science_targets", "white_dwarfs",
-                  "guide_stars", "sky_fibres"]
-        colors = ["r", "y", "b", "g"]
+        labels = self.get_available_tables().keys()
+        colors = ["r", "b", "y", "g", "gray"]
         for color, label in zip(colors, labels):
-            if (table := self.__getattribute__(label)) is not None:
+            if (table := self[label]) is not None:
+                label = label.replace("_", " ") + f" ({len(table)})"
                 ax.scatter(table["ra"], table["dec"],
-                           label=label.replace("_", " "), c=color, **kwargs)
+                           label=label, c=color, **kwargs)
         ax.scatter(self.obs_ra, self.obs_dec, s=10, marker="x", color="k",
                    label="centre")
         ax.set_xlabel("RA")
@@ -274,22 +331,52 @@ class TargetContainer:
         ax.legend()
         ax.set_title(f"Observation {self.container_id}")
 
-    def write_target_file(self):
+    def pprint(self):
+        print(f"[{self.container_id}] at [{self.obs_ra:.2f}°, {self.obs_dec:.2f}°] with {len(self)} total objects.")
+        for key, table in self.get_available_tables().items():
+            print(f"{key:18}-> {len(table)} sources")
+
+    def get_full_target_file(self):
         if len((keys := self.get_available_tables().keys())) < 4:
             diff = 4 - len(keys)
             raise UserWarning(f"You are missing {diff} tables.\n"
                               f"So far, only the following tables are available: {keys}")
-        science_targets = _sanitize_table_for_observation(
-            self.science_targets, "P")
+        cluster_members = _sanitize_table_for_observation(
+            self.cluster_members, "P", priority=8)
+        agn_candidates = _sanitize_table_for_observation(
+            self.agn_candidates, "P", priority=6)
         white_dwarfs = _sanitize_table_for_observation(
             self.white_dwarfs, "P")
         guide_stars = _sanitize_table_for_observation(
             self.guide_stars, "F")
         sky_fibres = _sanitize_table_for_observation(
             self.sky_fibres, "S")
-        tables = science_targets, white_dwarfs, guide_stars, sky_fibres
-        for table in tables:
-            table["obj_name"] = Column(table["obj_name"], dtype="str")
-        full_table = vstack(
-            [science_targets, white_dwarfs, guide_stars, sky_fibres])
+        tables = cluster_members, agn_candidates, white_dwarfs, guide_stars, sky_fibres
+        full_table = vstack(tables)
+        count_before = len(full_table)
+        full_table = unique(full_table, "obj_name")
+        if (diff := count_before - len(full_table)) > 0:
+            print(f"Removed {diff} duplicate source(s).")
         return full_table
+
+    def get_fld_file_header(self) -> str:
+        label = f"eromapper cluster follow-up: {self.container_id}"
+        utdate = "2023 02 19"
+        ra, dec = convert_radec_to_hmsdms(
+            self.obs_ra, self.obs_dec, " ", precision=2)
+        file_header = (f"LABEL {label}\nUTDATE {utdate}\nCENTRE {ra} {dec}\nEQUINOX J2000\n"
+                       f"WLEN1 6000\nPROPER_MOTIONS")
+        return file_header
+
+    def write_targets_to_disc(self, fpath: Optional[Path] = None, overwrite=True):
+        if fpath is None:
+            fpath = PATHS.get_fld_fname(self.container_id)
+        all_targets = self.get_full_target_file()
+        all_targets.write(fpath, format="csv", delimiter="\t", overwrite=overwrite,
+                          formats={"obj_name": lambda x: x.upper(), "rmag": "%.3f"})
+        header = self.get_fld_file_header()
+        # Now that the file has been written, we have to prepend the file header:
+        with open(fpath, 'r+', encoding="utf8") as f:
+            content = f.read()
+            f.seek(0, 0)
+            f.write(header + '\n\n# ' + content)

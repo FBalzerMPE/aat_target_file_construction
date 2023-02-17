@@ -33,11 +33,11 @@ def convert_radec_to_hmsdms(ra: float, dec: float,
     """
     # Convert ra and dec to hms and dms employing astropy's SkyCoord utility:
     sky_coord = SkyCoord(ra, dec, unit="deg")
+    hms, dms = sky_coord.to_string('hmsdms', precision=precision).split()
     if delimiter is None:
-        hms, dms = sky_coord.to_string('hmsdms', precision=precision).split()
-    else:
-        hms, dms = [s.replace("d", delimiter).replace(
-            "h", delimiter).replace("m", delimiter).replace("s", "") for s in sky_coord.to_string('hmsdms', precision=precision).split()]
+        return hms, dms
+    hms, dms = [s.replace("d", delimiter).replace(
+        "h", delimiter).replace("m", delimiter).replace("s", "") for s in (hms, dms)]
     return hms, dms
 
 
