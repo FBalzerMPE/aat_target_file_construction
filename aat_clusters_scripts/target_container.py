@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import astropy.units as u
 import numpy as np
@@ -12,6 +12,7 @@ from matplotlib.axes import Axes
 from .helper_functions import (add_ra_dec_hms_dms_columns, calc_pm_tot,
                                convert_radec_to_hmsdms,
                                filter_for_existing_cols, filter_for_stars,
+                               get_legacysurvey_url,
                                get_objects_in_circular_region)
 from .paths import PATHS
 from .region import RectangularRegion
@@ -75,7 +76,7 @@ def _sanitize_simbad_table(table: Table) -> Table:
 
 def _sanitize_sweep_for_guide_stars(table: Table) -> Table:
     # Filter for pointlike objects:
-    table = table["type"] == "PSF"
+    table = table[table["type"] == "PSF"]
     table.rename_columns(cols := table.colnames, [col.lower() for col in cols])
     table.rename_column("gaia_phot_rp_mean_mag", "rmag")
     table["obj_name"] = [f"G_{objid}" for objid in table["ref_id"]]
@@ -102,6 +103,8 @@ def _retrieve_simbad_table(ra: float, dec: float, radius: float = 1) -> Table:
 
 def _generate_sky_fibres_from_sweep(table: Table) -> Table:
     num_initial_points = 15000
+    # Set an initial seed to achieve reproducible random results:
+    np.random.seed(0)
     random_ra = np.random.uniform(
         np.min(table["ra"]), np.max(table["ra"]), num_initial_points)
     random_dec = np.random.uniform(
@@ -118,8 +121,6 @@ def _generate_sky_fibres_from_sweep(table: Table) -> Table:
     min_distance_to_others = 1 * u.arcmin
     sky_fibres = sky_fibres[d2d > min_distance_to_others]
     sky_fibres = Table([sky_fibres.ra, sky_fibres.dec], names=["ra", "dec"])
-    # Limit them to the same circular extent:
-    sky_fibres = get_objects_in_circular_region(sky_fibres)
     return sky_fibres
 
 
@@ -129,7 +130,8 @@ def _sanitize_fibre_table(table: Table) -> Table:
     sky_coords = SkyCoord(table["ra"], table["dec"], unit="deg")
     table["ra"] = sky_coords.ra
     table["dec"] = sky_coords.dec
-    table["obj_name"] = [f"skyfibre_{i}" for i in range(len(table))]
+    table["obj_name"] = [
+        f"skyfibre_{str(i).zfill(3)}" for i in range(len(table))]
     table["rmag"] = 30
     table["pmra"] = 0
     table["pmdec"] = 0
@@ -155,8 +157,13 @@ def _sanitize_table_for_observation(table, obs_type: Literal["P", "S", "F"], pri
     # The program ID does not matter for us, but we need to provide it
     table["program_id"] = 0
     table = add_ra_dec_hms_dms_columns(table)
+    # Convert proper motions from mas/yr to arcsec/yr
+    table["pmra"] = table["pmra"] / 1000.
+    table["pmdec"] = table["pmdec"] / 1000.
     relevant_cols = ["obj_name", "ra_hms", "dec_dms", "obs_type",
                      "priority", "rmag", "program_id", "pmra", "pmdec"]
+    table = unique(table, "obj_name")
+    table.sort("obj_name")
     return table[relevant_cols]
 
 #######################################
@@ -170,6 +177,7 @@ class TargetContainer:
     obs_dec: float
     selection_radius: float = 1.0  # The radius in degrees
     region: RectangularRegion = field(init=False)
+    ls_url: str = field(init=False)
     cluster_members: Optional[Table] = None
     agn_candidates: Optional[Table] = None
     white_dwarfs: Optional[Table] = None
@@ -179,6 +187,7 @@ class TargetContainer:
     def __post_init__(self):
         self.region = RectangularRegion.from_centre_and_radius(
             self.obs_ra, self.obs_dec, self.selection_radius)
+        self.ls_url = get_legacysurvey_url(self.obs_ra, self.obs_dec)
 
     def __getitem__(self, key):
         return self.__getattribute__(key)
@@ -306,7 +315,7 @@ class TargetContainer:
         """
         sweep = self.region.get_included_sweep_table()
         sweep = get_objects_in_circular_region(
-            self.obs_ra, self.obs_dec, self.selection_radius)
+            sweep, self.obs_ra, self.obs_dec, self.selection_radius)
         # ! Note: We renamed RPmag to rmag for consistency with the other tables!
         guide_stars = _sanitize_sweep_for_guide_stars(sweep)
 
@@ -323,10 +332,14 @@ class TargetContainer:
         mask &= guide_stars["pm_tot"] <= pm_max
         guide_stars = guide_stars[mask]
         count_flux_limited = len(guide_stars)
+        # Select the 150 brightest ones
+        guide_stars.sort("rmag")
+        limiting_count = 150
+        guide_stars = guide_stars[:limiting_count]
 
         self.guide_stars = guide_stars
         print(
-            f"[{self.container_id}] {count_flux_limited} guide stars have been registered.")
+            f"[{self.container_id}] {limiting_count} guide stars have been registered.")
         if not verbose:
             return
         info_string = f"\t{count_initial = }\n\t{count_clean = }\n"
@@ -337,12 +350,14 @@ class TargetContainer:
         """Generate 200 random sky fibres from the legacy DR10 imaging"""
         sweep = self.region.get_included_sweep_table()
         sweep = get_objects_in_circular_region(
-            self.obs_ra, self.obs_dec, self.selection_radius)
+            sweep, self.obs_ra, self.obs_dec, self.selection_radius)
 
         sky_fibres = _generate_sky_fibres_from_sweep(sweep)
+        sky_fibres = get_objects_in_circular_region(
+            sky_fibres, self.obs_ra, self.obs_dec, self.selection_radius)
         count_initial = len(sky_fibres)
         limiting_count = 150
-        sky_fibres = sky_fibres[:150]
+        sky_fibres = sky_fibres[:limiting_count]
         sky_fibres = _sanitize_fibre_table(sky_fibres)
         self.sky_fibres = sky_fibres
 
@@ -353,8 +368,10 @@ class TargetContainer:
         info_string = f"\t{count_initial = }\n\t{limiting_count = }"
         print(info_string)
 
-    def plot_sources_on_ax(self, ax: Axes, **kwargs):
+    def plot_sources_on_ax(self, ax: Axes, types: Optional[Sequence[str]] = None, **kwargs):
         labels = self.get_available_tables().keys()
+        if types is not None:
+            labels = [label for label in labels if label in types]
         colors = ["r", "b", "y", "g", "gray"]
         for color, label in zip(colors, labels):
             if (table := self[label]) is not None:
@@ -376,7 +393,7 @@ class TargetContainer:
         for key, table in self.get_available_tables().items():
             print(f"{key:18}-> {len(table)} sources")
 
-    def get_full_target_file(self):
+    def get_full_target_table(self):
         if len((keys := self.get_available_tables().keys())) < 4:
             diff = 4 - len(keys)
             raise UserWarning(f"You are missing {diff} tables.\n"
@@ -394,7 +411,6 @@ class TargetContainer:
         tables = cluster_members, agn_candidates, white_dwarfs, guide_stars, sky_fibres
         full_table = vstack(tables)
         count_before = len(full_table)
-        full_table = unique(full_table, "obj_name")
         if (diff := count_before - len(full_table)) > 0:
             print(f"Removed {diff} duplicate source(s).")
         return full_table
@@ -416,7 +432,7 @@ class TargetContainer:
     def write_targets_to_disc(self, fpath: Optional[Path] = None, overwrite=True):
         if fpath is None:
             fpath = PATHS.get_fld_fname(self.container_id)
-        all_targets = self.get_full_target_file()
+        all_targets = self.get_full_target_table()
         all_targets.write(fpath, format="csv", delimiter="\t", overwrite=overwrite,
                           formats={"obj_name": lambda x: x.upper(), "rmag": "%.3f"})
         header = self.get_fld_file_header()
