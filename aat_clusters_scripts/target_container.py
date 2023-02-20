@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional, Sequence
@@ -6,13 +7,12 @@ import astropy.units as u
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.table import Table, unique, vstack
-from astroquery.simbad import Simbad
+from astropy.utils.metadata import MergeConflictWarning
 from matplotlib.axes import Axes
 
 from .helper_functions import (add_ra_dec_hms_dms_columns, calc_pm_tot,
                                convert_radec_to_hmsdms,
-                               filter_for_existing_cols, filter_for_stars,
-                               get_legacysurvey_url,
+                               filter_for_existing_cols, get_legacysurvey_url,
                                get_objects_in_circular_region)
 from .paths import PATHS
 from .region import RectangularRegion
@@ -59,19 +59,7 @@ def _sanitize_jacobs_white_dwarf_table(table: Table) -> Table:
     return table
 
 ##########################
-# - Simbad:
-
-
-def _sanitize_simbad_table(table: Table) -> Table:
-    # Sanitize the table by lowercasing colnames and turning ra and dec to degrees
-    table.rename_columns(cols := table.colnames, [col.lower() for col in cols])
-    sky_coords = SkyCoord(
-        table["ra"], table["dec"], unit=(u.hourangle, u.deg))
-    table["ra"] = sky_coords.ra
-    table["dec"] = sky_coords.dec
-    table.rename_column("flux_r", "rmag")
-    table.rename_column("main_id", "obj_name")
-    return table
+# - Guide stars:
 
 
 def _sanitize_sweep_for_guide_stars(table: Table) -> Table:
@@ -82,20 +70,6 @@ def _sanitize_sweep_for_guide_stars(table: Table) -> Table:
     table["obj_name"] = [f"G_{objid}" for objid in table["ref_id"]]
     relevant_cols = ["obj_name", "ra", "dec", "pmra", "pmdec", "rmag"]
     return table[relevant_cols]
-
-
-def _retrieve_simbad_table(ra: float, dec: float, radius: float = 1) -> Table:
-    """Retrieve the simbad sources around the given central `ra` and `dec` within
-    the provided `radius` (in deg).
-    Also obtain proper motion and r magnitude information.
-    """
-    custom_simbad = Simbad()
-    # print(custom_simbad.get_votable_fields())
-    custom_simbad.add_votable_fields(
-        "fluxdata(r)", "pmra", "pmdec", "otype", "morphtype", "otypes", "otype(opt)", "rvz_type", "sptype")
-    sources = custom_simbad.query_region(
-        SkyCoord(ra, dec, unit="deg"), radius=radius * u.deg)
-    return sources
 
 ###########################
 # - Sky fibres:
@@ -120,6 +94,7 @@ def _generate_sky_fibres_from_sweep(table: Table) -> Table:
     idx, d2d, _ = sky_fibres.match_to_catalog_sky(sky_fibres, nthneighbor=2)
     min_distance_to_others = 1 * u.arcmin
     sky_fibres = sky_fibres[d2d > min_distance_to_others]
+    # Convert the pairs into a proper astropy table:
     sky_fibres = Table([sky_fibres.ra, sky_fibres.dec], names=["ra", "dec"])
     return sky_fibres
 
@@ -139,7 +114,7 @@ def _sanitize_fibre_table(table: Table) -> Table:
 
 
 #####################
-# - Adding information
+# - Unifying the table:
 
 @np.vectorize
 def _clean_object_name(name: str) -> str:
@@ -190,7 +165,13 @@ class TargetContainer:
         self.ls_url = get_legacysurvey_url(self.obs_ra, self.obs_dec)
 
     def __getitem__(self, key):
-        return self.__getattribute__(key)
+        try:
+            return self.__getattribute__(key)
+        except AttributeError as exc:
+            avail = ["cluster_members", "agn_candidates", "white_dwarfs",
+                     "guide_stars", "sky_fibres"]
+            raise AttributeError(
+                f"{key} not found, please select one of the following:\n{avail}") from exc
 
     def __len__(self):
         return sum([len(t) for t in self.get_available_tables().values()])
@@ -216,10 +197,10 @@ class TargetContainer:
         count_brightness_cut = len(members)
 
         self.cluster_members = members
-        print(
-            f"[{self.container_id}] {count_brightness_cut} science targets (cluster members) have been registered.")
         if not verbose:
             return
+        print(
+            f"[{self.container_id}] {count_brightness_cut} science targets (cluster members) have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_clean = }"
         info_string += f"\n\t{count_brightness_cut = }"
         print(info_string)
@@ -238,10 +219,10 @@ class TargetContainer:
         count_brightness_cut = len(agn_candidates)
 
         self.agn_candidates = agn_candidates
-        print(
-            f"[{self.container_id}] {count_brightness_cut} more science targets (AGN) have been registered.")
         if not verbose:
             return
+        print(
+            f"[{self.container_id}] {count_brightness_cut} more science targets (AGN) have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_in_region = }"
         info_string += f"\n\t{count_brightness_cut = }"
         print(info_string)
@@ -286,10 +267,10 @@ class TargetContainer:
         count_good = len(good_white_dwarfs)
 
         self.white_dwarfs = good_white_dwarfs
-        print(
-            f"[{self.container_id}] {count_good} white dwarfs have been registered.")
         if not verbose:
             return
+        print(
+            f"[{self.container_id}] {count_good} white dwarfs have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_in_region = }\n"
         info_string += f"\t{count_clean = }\n\t{count_faint = }"
         print(info_string)
@@ -338,10 +319,10 @@ class TargetContainer:
         guide_stars = guide_stars[:limiting_count]
 
         self.guide_stars = guide_stars
-        print(
-            f"[{self.container_id}] {limiting_count} guide stars have been registered.")
         if not verbose:
             return
+        print(
+            f"[{self.container_id}] {limiting_count} guide stars have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_clean = }\n"
         info_string += f"\t{count_flux_limited = }"
         print(info_string)
@@ -359,12 +340,12 @@ class TargetContainer:
         limiting_count = 150
         sky_fibres = sky_fibres[:limiting_count]
         sky_fibres = _sanitize_fibre_table(sky_fibres)
-        self.sky_fibres = sky_fibres
 
-        print(
-            f"[{self.container_id}] {limiting_count} sky fibres have been registered.")
+        self.sky_fibres = sky_fibres
         if not verbose:
             return
+        print(
+            f"[{self.container_id}] {limiting_count} sky fibres have been registered.")
         info_string = f"\t{count_initial = }\n\t{limiting_count = }"
         print(info_string)
 
@@ -389,9 +370,10 @@ class TargetContainer:
         ax.set_title(f"Observation {self.container_id}")
 
     def pprint(self):
+        """Pretty-print the most important parameters of the container."""
         print(f"[{self.container_id}] at [{self.obs_ra:.2f}°, {self.obs_dec:.2f}°] with {len(self)} total objects.")
         for key, table in self.get_available_tables().items():
-            print(f"{key:18}-> {len(table)} sources")
+            print(f"\t{key:18}-> {len(table)} sources")
 
     def get_full_target_table(self):
         if len((keys := self.get_available_tables().keys())) < 4:
@@ -409,7 +391,9 @@ class TargetContainer:
         sky_fibres = _sanitize_table_for_observation(
             self.sky_fibres, "S")
         tables = cluster_members, agn_candidates, white_dwarfs, guide_stars, sky_fibres
-        full_table = vstack(tables)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", MergeConflictWarning)
+            full_table = vstack(tables)
         count_before = len(full_table)
         if (diff := count_before - len(full_table)) > 0:
             print(f"Removed {diff} duplicate source(s).")

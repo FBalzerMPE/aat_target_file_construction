@@ -1,5 +1,5 @@
 
-from functools import reduce
+import warnings
 from typing import Optional, Sequence
 
 import astropy.units as u
@@ -160,7 +160,10 @@ def display_html_site(url: str, width: float = 800, height: float = 600, provide
     if provide_link:
         link = f"<a href={url}>LINK</a><br>"
         output_string = link + output_string
-    display(HTML(output_string))
+    with warnings.catch_warnings():
+        # We ignore this warning since IFrames don't work properly in my notebooks:
+        warnings.simplefilter("ignore", UserWarning)
+        display(HTML(output_string))
 
 
 def _get_html_image_string(source: str, width: float = 600, height: float = 600) -> str:
