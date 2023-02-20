@@ -47,7 +47,7 @@ In my case, the coordinates correspond to the central coordinates of the cluster
 Then, the science targets need to be loaded in.\
 In the case of this script, we have galaxy cluster members that are loaded depending on the id, and AGN, which we simply select from a 1 degree radius around the central RA and DEC.\
 In my case, I selected the cluster members to observe and formatted the table to have the columns we need.\
-In addition to that, I discard all sources with $r\text{\_mag} < 17.5$ as they are too bright.\
+In addition to that, I discard all sources with $r_\text{mag} < 17.5$ as they are too bright.\
 Then, the positional information of AGN is loaded in to provide additional targets as the cluster members are only in the centre of the telescopes field of view.
 
 ### Spectroscopic calibration: Adding White Dwarfs
@@ -62,7 +62,7 @@ For the selection, we follow the procedure adopted in `SelectWD1.py` with an add
 
 - We select all white dwarfs within a radius of `1 deg` of the central ra and dec for each cluster.
 - Also, we require `RPmag`, `pmra` und `pmdec` to exist (although this seems to be ok for all sources).
-- We discard all sources with $r\text{\_mag} < 17.5$ as they might be too bright for proper calibration.
+- We discard all sources with $r_\text{mag} < 17.5$ as they might be too bright for proper calibration.
 - Finally, we select 10 of them since there should not be more than two needed for the calibration, and this allows for optimal fibre selection by the telescope.
 
 ### Guide star selection
@@ -117,7 +117,7 @@ To select guide stars to guide the telescope during the observation, a similar p
 A search radius of `1 degree` around the centre of each observation should be used.
 - Then, all guide stars without `pmra`, `pmdec` or `rmag` values are removed.
 - All sources too dim, too bright, or with a high proper motion are removed, corresponding to the following criteria:
-  - $12 < r \text{\_mag} < 14$
+  - $12 < r_\text{mag} < 14$
   - $pm < 20$ mas/yr, where $pm:=\sqrt{(0.3977 pm_\text{ra})^2+pm_\text{dec}^2}$
 - Then, it is made sure that the type of the sources is stellar.
 - Finally, the sources are sorted by their r magnitude.
