@@ -26,6 +26,7 @@ For this script to work, the following packages need to be installed:
 - `astropy`
 - `astroquery`
 - Standard modules like `numpy`, `scipy` (for the matching algorithm of astropy), and `matplotlib`
+- Sufficiently large space on disk to save the downloaded SWEEP files (~2 GB/observation)
   
 Also, a python version $>$ 3.9 is recommended, but not entirely necessary (with earlier versions, you might need to replace some types in the type hints with imports from the `typing` module, e. g. replace `tuple[str, str]` with `Tuple[str, str]` and include `from typing import Tuple` in the header.)
 

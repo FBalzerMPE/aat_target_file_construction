@@ -399,12 +399,11 @@ class TargetContainer:
             print(f"Removed {diff} duplicate source(s).")
         return full_table
 
-    def get_fld_file_header(self) -> str:
-        label = f"eromapper cluster follow-up: {self.container_id}"
-        utdate = "2023 02 19"
+    def get_fld_file_header(self, observation_utdate: str, observation_label: Optional[str] = None) -> str:
+        label = f"Observation {self.container_id}" if observation_label is None else observation_label
         ra, dec = convert_radec_to_hmsdms(
             self.obs_ra, self.obs_dec, " ", precision=2)
-        file_header = (f"LABEL {label}\nUTDATE {utdate}\nCENTRE {ra} {dec}\nEQUINOX J2000\n"
+        file_header = (f"LABEL {label}\nUTDATE {observation_utdate}\nCENTRE {ra} {dec}\nEQUINOX J2000\n"
                        f"WLEN1 6000\nPROPER_MOTIONS\n\n")
         file_header += ("""
 # Proper motions in arcsec/year
@@ -413,15 +412,19 @@ class TargetContainer:
 # Name 			  hh  mm ss.sss  dd  mm ss.sss 		      mag     ID      ra	dec\n""")
         return file_header
 
-    def write_targets_to_disc(self, fpath: Optional[Path] = None, overwrite=True):
+    def write_targets_to_disc(self, observation_utdate: str, fpath: Optional[Path] = None, overwrite=True, verbose=False):
         if fpath is None:
             fpath = PATHS.get_fld_fname(self.container_id)
         all_targets = self.get_full_target_table()
         all_targets.write(fpath, format="csv", delimiter="\t", overwrite=overwrite,
                           formats={"obj_name": lambda x: x.upper(), "rmag": "%.3f"})
-        header = self.get_fld_file_header()
+        header = self.get_fld_file_header(observation_utdate)
         # Now that the file has been written, we have to prepend the file header:
         with open(fpath, 'r+', encoding="utf8") as f:
             content = f.readlines()
             f.seek(0, 0)
             f.write(header + "".join(content[1:]))
+        if verbose:
+            self.pprint()
+            print(
+                f"Successfully written the .fld file to {fpath} with the following header:\n{header}")

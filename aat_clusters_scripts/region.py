@@ -4,58 +4,34 @@ import os
 import warnings
 from dataclasses import dataclass
 from math import ceil, floor
-from typing import Literal, Union
+from typing import Literal
+from urllib.error import HTTPError
+from urllib.request import urlretrieve
 
 import numpy as np
+import requests
 from astropy.table import Table, vstack
 from astropy.units import UnitsWarning
-from matplotlib.patches import Polygon
-from SciServer import Authentication, Files
 
 from .paths import PATHS
 
-
-def _log_in_to_sciserver() -> str:
-    """Authenticate with my password at the sciserver"""
-    pw_dir = os.environ["HANDYSTUFF"]
-    with open(pw_dir + "/nice_file.txt", "r", encoding="utf-8") as f:
-        login_name, login_pw = [l.split()[1] for l in f.readlines()[:2]]
-    token1 = Authentication.login(login_name, login_pw)
-    return token1
+_BASE_LEGACY_URL = "https://portal.nersc.gov/cfs/cosmo/data/legacysurvey/dr10/south/sweep/10.0/"
 
 
-def get_filenames_in_sciserver_dir(sciserver_dir: str) -> dict[str: int]:
-    """Retrieves the files in the given sciserver directory and returns them
-    and the respective sizes.
-
-    Returns
-    -------
-    dict[FullFilepath: int]
-        A dictionary mapping the filepaths to the sizes (in Bytes)
-    """
-    _log_in_to_sciserver()
-    file_service = Files.getFileServiceFromName("FileService")
-    files = Files.dirList(
-        file_service, sciserver_dir, level=2)["root"]["files"]
-    file_size_dict = {sciserver_dir + "/" +
-                      f["name"]: f["size"] for f in files}
-    return file_size_dict
-
-
-def download_file_from_sciserver(sciserver_filepath: str, destination: str):
-    """Downloads the given file at the sciserver_filepath from the remote directory.
-
-    Parameters
-    ----------
-    sciserver_filepath : FullFilepath
-        The SciServer path of the file
-    destination : FullFilepath
-        The destination path for the file.
-    """
-    _log_in_to_sciserver()
-    file_service = Files.getFileServiceFromName("FileService")
-    Files.download(file_service, sciserver_filepath,
-                   quiet=False, localFilePath=destination)
+def _download_sweep_file(filename):
+    destpath = PATHS.sweep.joinpath(filename)
+    # Extract the file size from the header
+    filesize = int(requests.head(
+        _BASE_LEGACY_URL + filename).headers.get("content-length", 0))
+    filesize = filesize / 1024**3
+    print(
+        f"Downloading brick {filename} (approx. size of {filesize:.2f} GB).\n"
+        "This may take a while (took ~5 min/GB for me)...")
+    try:
+        urlretrieve(_BASE_LEGACY_URL + filename, destpath)
+    except HTTPError:
+        warnings.warn(
+            f"Could not locate {filename} at the expected repository.", UserWarning)
 
 
 def _get_sweep_sgn_str(dec: float) -> str:
@@ -146,21 +122,10 @@ class RectangularRegion:
     def download_sweep_files_for_region(self):
         """Download missing sweep files in this region
         """
-        # Method to list sweep bricks:
-        sweep_path = "external_catalogs/DECam/legacysurvey/DR10/X.X/"
         bricks_to_download = self.get_sweep_brick_filenames(
             filter_not_on_disk=True)
-        if len(bricks_to_download) == 0:
-            return
-        file_size_dict = get_filenames_in_sciserver_dir(sweep_path)
-        relevant_files = [
-            f for brick in bricks_to_download for f in file_size_dict if brick in f]
-        for filepath in relevant_files:
-            destpath = PATHS.sweep.joinpath(filepath.split("/")[-1])
-            filesize = file_size_dict[filepath] / 1024**3
-            print(
-                f"Downloading {filepath} (approx. size of {filesize:.2f} GB)...")
-            download_file_from_sciserver(filepath, destpath)
+        for filename in bricks_to_download:
+            _download_sweep_file(filename)
 
     def get_stretched_bounds(self, direction: Literal["ra", "dec"], stretch_factor: float = 1.1) -> tuple[float, float]:
         """Provide rectangular right ascension bounds that are stretched by the given factor
