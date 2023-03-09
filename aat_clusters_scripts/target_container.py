@@ -10,40 +10,14 @@ from astropy.table import Table, unique, vstack
 from astropy.utils.metadata import MergeConflictWarning
 from matplotlib.axes import Axes
 
-from .helper_functions import (add_ra_dec_hms_dms_columns, calc_pm_tot,
-                               convert_radec_to_hmsdms,
-                               filter_for_existing_cols, get_legacysurvey_url,
-                               get_objects_in_circular_region)
+from .helper_functions import (
+    calc_pm_tot, convert_radec_to_hmsdms, filter_for_existing_cols,
+    get_legacysurvey_url, get_objects_in_circular_region,
+    reduce_table_to_relevant_columns_and_remove_duplicates,
+    sanitize_table_for_observation)
+from .load_science_targets import get_science_targets
 from .paths import PATHS
 from .region import RectangularRegion
-
-##############################
-# - Science targets:
-
-
-def _sanitize_cluster_members(member_table: Table) -> Table:
-    """Retrieve the vital information for all members associated with this cluster id"""
-    member_table["obj_name"] = [
-        f"erosource_{member['id']}" for member in member_table]
-    # The magnitudes are given as triplets in the [mag] column (as grz), so we select the middle one:
-    member_table["rmag"] = member_table["mag"][:, 1]
-    # Since we're observing galaxies, their proper motions are 0:
-    member_table["pmra"] = 0
-    member_table["pmdec"] = 0
-    relevant_cols = ["ra", "dec", "obj_name", "rmag", "pmra", "pmdec"]
-    return member_table[relevant_cols]
-
-
-def _sanitize_agn_candidates(agn_table: Table) -> Table:
-    """Retrieve the vital information for all agn for this observation"""
-    old_names = ["ERO_ID", "LS10_RA", "LS10_DEC", "RMAG"]
-    new_names = ["obj_name", "ra", "dec", "rmag"]
-    agn_table.rename_columns(old_names, new_names)
-    # Since we're observing galaxies, their proper motions are 0:
-    agn_table["pmra"] = 0
-    agn_table["pmdec"] = 0
-    relevant_cols = ["ra", "dec", "obj_name", "rmag", "pmra", "pmdec"]
-    return agn_table[relevant_cols]
 
 ########################
 # - White dwarfs:
@@ -75,7 +49,9 @@ def _sanitize_sweep_for_guide_stars(table: Table) -> Table:
 # - Sky fibres:
 
 
-def _generate_sky_fibres_from_sweep(table: Table) -> Table:
+@u.quantity_input(min_dist_to_sweep="angle", min_dist_to_other_fibres="angle")
+def _generate_sky_fibres_from_sweep(table: Table, min_dist_to_sweep=u.Quantity,
+                                    min_dist_to_other_fibres=u.Quantity) -> Table:
     num_initial_points = 15000
     # Set an initial seed to achieve reproducible random results:
     np.random.seed(0)
@@ -87,13 +63,11 @@ def _generate_sky_fibres_from_sweep(table: Table) -> Table:
     sweep_coords = SkyCoord(table["ra"], table["dec"])
     # Find all random coords far away from sweep sources
     idx, d2d, _ = random_coords.match_to_catalog_sky(sweep_coords)
-    min_distance_to_others = 10 * u.arcsec
-    sky_fibres = random_coords[d2d > min_distance_to_others]
+    sky_fibres = random_coords[d2d > min_dist_to_sweep]
 
     # Find all random coords far away from each other to prevent clustering:
     idx, d2d, _ = sky_fibres.match_to_catalog_sky(sky_fibres, nthneighbor=2)
-    min_distance_to_others = 1 * u.arcmin
-    sky_fibres = sky_fibres[d2d > min_distance_to_others]
+    sky_fibres = sky_fibres[d2d > min_dist_to_other_fibres]
     # Convert the pairs into a proper astropy table:
     sky_fibres = Table([sky_fibres.ra, sky_fibres.dec], names=["ra", "dec"])
     return sky_fibres
@@ -113,48 +87,59 @@ def _sanitize_fibre_table(table: Table) -> Table:
     return table
 
 
-#####################
-# - Unifying the table:
-
-@np.vectorize
-def _clean_object_name(name: str) -> str:
-    if isinstance(name, bytes):
-        name = name.decode("utf-8")
-    return name.replace(" ", "_")
-
-
-def _sanitize_table_for_observation(table, obs_type: Literal["P", "S", "F"], priority=9) -> Table:
-    # [P = 'Science targets', F = 'Guide stars', S = 'Sky fibres']
-    assert obs_type in "PSF", f"Please choose a valid observation type and not {obs_type}"
-    table["obj_name"] = _clean_object_name(table["obj_name"])
-    table["obs_type"] = obs_type
-    table["priority"] = priority
-    # The program ID does not matter for us, but we need to provide it
-    table["program_id"] = 0
-    table = add_ra_dec_hms_dms_columns(table)
-    # Convert proper motions from mas/yr to arcsec/yr
-    table["pmra"] = table["pmra"] / 1000.
-    table["pmdec"] = table["pmdec"] / 1000.
-    relevant_cols = ["obj_name", "ra_hms", "dec_dms", "obs_type",
-                     "priority", "rmag", "program_id", "pmra", "pmdec"]
-    table = unique(table, "obj_name")
-    table.sort("obj_name")
-    return table[relevant_cols]
-
 #######################################
 # - The actual TargetContainer class:
 
 
 @dataclass
 class TargetContainer:
-    container_id: int
+    """The main class to set up your observation.
+    Initially only containing the observation-id, the central ra and dec and possibly
+    the selection radius, it can be successively filled with the various target tables
+    and finally be used to construct the .fld file.
+
+    Attributes
+    ----------
+    observation_id: int
+        The id of the observation, used to uniquely identify the observation (e. g. used
+        to name the .fld file)
+    obs_ra: float
+        The central right ascension for the observation, expected in degrees
+    obs_dec: float
+        The central declination for the observation, expected in degrees
+    selection_radius: float = 1.0
+        The radius of the observation, expected in degrees
+    region: RectangularRegion
+        The square-shaped region taken up by the observation
+    ls_url: str = field(init=False)
+        A link to the legacy surveys in which the area can be displayed
+    science_targets: Optional[Table] = None
+        A table of the science targets [filled after calling `get_science_targets`]
+    white_dwarfs: Optional[Table] = None
+        A table of the white dwarfs [filled after calling `get_white_dwarfs`]
+    guide_stars: Optional[Table] = None
+        A table of the guide stars [filled after calling `get_guide_stars`]
+    sky_fibres: Optional[Table] = None
+        A table of the sky fibres [filled after calling `get_sky_fibres`]
+
+    Example
+    -------
+    To use this class, simply initialise it with the desired parameters and
+    successively call the functions to fill the tables:
+        >>> container = TargetContainer(1234, 180, 20)
+        >>> container.get_science_targets()
+        >>> container.get_white_dwarfs()
+        >>> container.get_guide_stars(mag_r_min=14, mag_r_max=14.5, pm_max=20)
+        >>> container.get_sky_fibres()
+        >>> container.write_targets_to_disc("2023 02 22")
+    """
+    observation_id: int
     obs_ra: float
     obs_dec: float
     selection_radius: float = 1.0  # The radius in degrees
     region: RectangularRegion = field(init=False)
     ls_url: str = field(init=False)
-    cluster_members: Optional[Table] = None
-    agn_candidates: Optional[Table] = None
+    science_targets: Optional[Table] = None
     white_dwarfs: Optional[Table] = None
     guide_stars: Optional[Table] = None
     sky_fibres: Optional[Table] = None
@@ -165,10 +150,11 @@ class TargetContainer:
         self.ls_url = get_legacysurvey_url(self.obs_ra, self.obs_dec)
 
     def __getitem__(self, key):
+        """Enable dict-like access of the different subsets."""
         try:
             return self.__getattribute__(key)
         except AttributeError as exc:
-            avail = ["cluster_members", "agn_candidates", "white_dwarfs",
+            avail = ["science_targets", "white_dwarfs",
                      "guide_stars", "sky_fibres"]
             raise AttributeError(
                 f"{key} not found, please select one of the following:\n{avail}") from exc
@@ -178,56 +164,16 @@ class TargetContainer:
 
     def get_available_tables(self) -> dict[str, Table]:
         """Get all of the currently available tables."""
-        keys = ["cluster_members", "agn_candidates", "white_dwarfs",
+        keys = ["science_targets", "white_dwarfs",
                 "guide_stars", "sky_fibres"]
         return {key: table for key in keys if (table := self[key]) is not None}
 
-    def get_cluster_members(self, mag_r_min=17.5, verbose=True):
-        members = Table.read(PATHS.members)
-        # This selection only works due to our setup:
-        members = members[members["mem_match_id"] == self.container_id]
-        members = _sanitize_cluster_members(members)
-        count_initial = len(members)
-        # Discard all rows where no rmag, pmra or pmdec information is available:
-        members = filter_for_existing_cols(members)
-        count_clean = len(members)
-        # Discard WDs brighter than the [mag_r_min]
-        brightness_cut = members["rmag"] >= mag_r_min
-        members = members[brightness_cut]
-        count_brightness_cut = len(members)
+    def get_science_targets(self, verbose=True):
+        """Register the science targets."""
+        self.science_targets = get_science_targets(
+            self.observation_id, self.obs_ra, self.obs_dec, self.selection_radius, verbose)
 
-        self.cluster_members = members
-        if not verbose:
-            return
-        print(
-            f"[{self.container_id}] {count_brightness_cut} science targets (cluster members) have been registered.")
-        info_string = f"\t{count_initial = }\n\t{count_clean = }"
-        info_string += f"\n\t{count_brightness_cut = }"
-        print(info_string)
-
-    def get_agn(self, verbose=True):
-        agn_candidates = PATHS.read_table(PATHS.agn_candidates)
-        agn_candidates = _sanitize_agn_candidates(agn_candidates)
-        count_initial = len(agn_candidates)
-        # Restrict to circular region around pointing:
-        agn_candidates = get_objects_in_circular_region(
-            agn_candidates, self.obs_ra, self.obs_dec, self.selection_radius)
-        count_in_region = len(agn_candidates)
-        mask = agn_candidates["rmag"] >= 17.5
-        mask &= agn_candidates["rmag"] <= 21.5
-        agn_candidates = agn_candidates[mask]
-        count_brightness_cut = len(agn_candidates)
-
-        self.agn_candidates = agn_candidates
-        if not verbose:
-            return
-        print(
-            f"[{self.container_id}] {count_brightness_cut} more science targets (AGN) have been registered.")
-        info_string = f"\t{count_initial = }\n\t{count_in_region = }"
-        info_string += f"\n\t{count_brightness_cut = }"
-        print(info_string)
-
-    def get_white_dwarfs(self, mag_r_min=17.5, verbose=True):
+    def get_white_dwarfs(self, mag_r_min=17.5, num_to_keep: int = 10, verbose=True):
         """Load the white dwarfs we need to observe for spectral calibration.
         Then, perform selection based on:
             - Area (circular region around central coordinates)
@@ -238,6 +184,9 @@ class TargetContainer:
         ----------
         mag_r_min : float, optional
             The maximum brightness a white dwarf should have, by default 17.5
+        num_to_keep : int, optional
+            The number of White Dwarfs to keep as only a small number will be needed
+            for the spectroscopic calibration.
         verbose : bool, optional
             Whether additional information on the selection should be printed, by default True
         """
@@ -260,28 +209,32 @@ class TargetContainer:
 
         # - Select the 10 white dwarfs closest to the median magnitude of our sources
         white_dwarfs.sort("rmag")
-        median_mag = np.median(self.cluster_members["rmag"])
+        median_mag = np.median(self.science_targets["rmag"])
         closest_index = np.abs(white_dwarfs["rmag"] - median_mag).argmin()
-        good_white_dwarfs = white_dwarfs[closest_index:closest_index + 10]
+        good_white_dwarfs = white_dwarfs[closest_index:closest_index + num_to_keep]
 
         count_good = len(good_white_dwarfs)
 
+        good_white_dwarfs = sanitize_table_for_observation(
+            good_white_dwarfs, "P", 9)
         self.white_dwarfs = good_white_dwarfs
         if not verbose:
             return
         print(
-            f"[{self.container_id}] {count_good} white dwarfs have been registered.")
+            f"[{self.observation_id}] {count_good} white dwarfs have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_in_region = }\n"
         info_string += f"\t{count_clean = }\n\t{count_faint = }"
         print(info_string)
 
     def get_guide_stars(self, mag_r_min: float, mag_r_max: float, pm_max: float, verbose=True):
-        """Query the simbad database for the guide stars in a circular region around the central
-        coordinates.
-        Then, perform selection based on:
+        """Select the Gaia sources of the SWEEP tables from a circular region around the central
+        coordinates as guide stars.
+        The selection is then based on:
             - Cleanliness (discard sources w/o rmag or proper motion)
             - Magnitude and PM requirements (see parameters)
             - Type (discard all non-stellar sources)
+
+        For an alternative way (by querying Simbad) see `unused_functions.py`.
 
         Parameters
         ----------
@@ -290,7 +243,7 @@ class TargetContainer:
         mag_r_max : float
             The maximum magnitude a guide star should have
         pm_max : float
-            The maximum proper motion a guide star should have
+            The maximum proper motion a guide star should have, in mas/year!
         verbose : bool, optional
             Whether additional information on the selection should be printed, by default True
         """
@@ -317,36 +270,62 @@ class TargetContainer:
         guide_stars.sort("rmag")
         limiting_count = 150
         guide_stars = guide_stars[:limiting_count]
-
+        guide_stars = sanitize_table_for_observation(guide_stars, "F", 9)
         self.guide_stars = guide_stars
         if not verbose:
             return
         print(
-            f"[{self.container_id}] {limiting_count} guide stars have been registered.")
+            f"[{self.observation_id}] {limiting_count} guide stars have been registered.")
         info_string = f"\t{count_initial = }\n\t{count_clean = }\n"
         info_string += f"\t{count_flux_limited = }"
         print(info_string)
 
-    def get_sky_fibres(self, verbose=True):
-        """Generate 200 random sky fibres from the legacy DR10 imaging"""
+    @u.quantity_input(min_dist_to_sweep="angle", min_dist_to_other_fibres="angle")
+    def get_sky_fibres(self, min_dist_to_sweep=10 * u.arcsec,
+                       min_dist_to_other_fibres=1 * u.arcmin,
+                       limiting_count=150, verbose=True):
+        """Generate a random set of sky fibres using the SWEEP catalogue of LS DR10.
+        This is done by generating a sufficient of amount of random ra and dec coordinates
+        in the area of interest, cross-matching these to the SWEEP sources, and discarding
+        all random coordinates closer than `min_dist_to_sweep`.
+        After that, only the top 150 of these are taken.
+        NOTE: This approach produces lower sky fibre densities for more densely populated
+        regions. If you find a good workaround that, feel free to send a mail or a PR!
+
+        Parameters
+        ----------
+        min_dist_to_sweep : Quantity[angle], optional
+            The minimum angular distance the sky fibres should have to sweep sources, by default 10*u.arcsec
+        min_dist_to_other_fibres : Quantity[angle], optional
+            The minimum angular distance the sky fibres should have to themselves, by default 1*u.arcmin
+        limiting_count : int, optional
+            The number of fibres to keep, by default 150
+        verbose : bool, optional
+            Print additional info if True., by default True
+        """
         sweep = self.region.get_included_sweep_table()
         sweep = get_objects_in_circular_region(
             sweep, self.obs_ra, self.obs_dec, self.selection_radius)
 
-        sky_fibres = _generate_sky_fibres_from_sweep(sweep)
+        sky_fibres = _generate_sky_fibres_from_sweep(
+            sweep, min_dist_to_sweep, min_dist_to_other_fibres)
         sky_fibres = get_objects_in_circular_region(
             sky_fibres, self.obs_ra, self.obs_dec, self.selection_radius)
         count_initial = len(sky_fibres)
-        limiting_count = 150
+        if count_initial < limiting_count:
+            warnings.warn(
+                f"There are only {count_initial} sky fibres while you requested {limiting_count}", UserWarning)
         sky_fibres = sky_fibres[:limiting_count]
         sky_fibres = _sanitize_fibre_table(sky_fibres)
 
+        sky_fibres = sanitize_table_for_observation(sky_fibres, "S", 9)
         self.sky_fibres = sky_fibres
         if not verbose:
             return
+        final_count = len(sky_fibres)
         print(
-            f"[{self.container_id}] {limiting_count} sky fibres have been registered.")
-        info_string = f"\t{count_initial = }\n\t{limiting_count = }"
+            f"[{self.observation_id}] {final_count} sky fibres have been registered.")
+        info_string = f"\t{count_initial = }\n\t{final_count = }"
         print(info_string)
 
     def plot_sources_on_ax(self, ax: Axes, types: Optional[Sequence[str]] = None, **kwargs):
@@ -367,11 +346,11 @@ class TargetContainer:
         if not ax.xaxis_inverted():
             ax.invert_xaxis()
         ax.legend()
-        ax.set_title(f"Observation {self.container_id}")
+        ax.set_title(f"Observation {self.observation_id}")
 
     def pprint(self):
         """Pretty-print the most important parameters of the container."""
-        print(f"[{self.container_id}] at [{self.obs_ra:.2f}°, {self.obs_dec:.2f}°] with {len(self)} total objects.")
+        print(f"[{self.observation_id}] at [{self.obs_ra:.2f}°, {self.obs_dec:.2f}°] with {len(self)} total objects.")
         for key, table in self.get_available_tables().items():
             print(f"\t{key:18}-> {len(table)} sources")
 
@@ -380,27 +359,17 @@ class TargetContainer:
             diff = 4 - len(keys)
             raise UserWarning(f"You are missing {diff} tables.\n"
                               f"So far, only the following tables are available: {keys}")
-        cluster_members = _sanitize_table_for_observation(
-            self.cluster_members, "P", priority=8)
-        agn_candidates = _sanitize_table_for_observation(
-            self.agn_candidates, "P", priority=6)
-        white_dwarfs = _sanitize_table_for_observation(
-            self.white_dwarfs, "P")
-        guide_stars = _sanitize_table_for_observation(
-            self.guide_stars, "F")
-        sky_fibres = _sanitize_table_for_observation(
-            self.sky_fibres, "S")
-        tables = cluster_members, agn_candidates, white_dwarfs, guide_stars, sky_fibres
+        tables = self.science_targets, self.white_dwarfs, self.guide_stars, self.sky_fibres
         with warnings.catch_warnings():
+            # Since we are only interested in the stack itself, metadata merge conflicts do not concern us:
             warnings.simplefilter("ignore", MergeConflictWarning)
             full_table = vstack(tables)
-        count_before = len(full_table)
-        if (diff := count_before - len(full_table)) > 0:
-            print(f"Removed {diff} duplicate source(s).")
+        full_table = reduce_table_to_relevant_columns_and_remove_duplicates(
+            full_table)
         return full_table
 
     def get_fld_file_header(self, observation_utdate: str, observation_label: Optional[str] = None) -> str:
-        label = f"Observation {self.container_id}" if observation_label is None else observation_label
+        label = f"Observation {self.observation_id}" if observation_label is None else observation_label
         ra, dec = convert_radec_to_hmsdms(
             self.obs_ra, self.obs_dec, " ", precision=2)
         file_header = (f"LABEL {label}\nUTDATE {observation_utdate}\nCENTRE {ra} {dec}\nEQUINOX J2000\n"
@@ -414,7 +383,7 @@ class TargetContainer:
 
     def write_targets_to_disc(self, observation_utdate: str, fpath: Optional[Path] = None, overwrite=True, verbose=False):
         if fpath is None:
-            fpath = PATHS.get_fld_fname(self.container_id)
+            fpath = PATHS.get_fld_fname(self.observation_id)
         all_targets = self.get_full_target_table()
         all_targets.write(fpath, format="csv", delimiter="\t", overwrite=overwrite,
                           formats={"obj_name": lambda x: x.upper(), "rmag": "%.3f"})

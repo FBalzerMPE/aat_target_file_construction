@@ -24,7 +24,7 @@ I provide one (in the future maybe two) handles to run this program:
 For this script to work, the following packages need to be installed:
 
 - `astropy`
-- `astroquery`
+- [`astroquery` (only necessary if you want to do Simbad or Gaia queries, see the 'unused functions.py' script for more information)]
 - Standard modules like `numpy`, `scipy` (for the matching algorithm of astropy), and `matplotlib`
 - Sufficiently large space on disk to save the downloaded SWEEP files (~2 GB/observation)
   
@@ -102,7 +102,10 @@ The `TargetContainer` then also provides a convenience method to plot the source
 
 ## <a id="things_to_change" name="things_to_change"></a>:warning:Things to change for different set-ups
 
-TODO
+To make full use of this script for setting up your own observation, the only major thing to change lies in `load_science_targets.py`, as you'll have to modify the `get_science_targets` function.\
+*Hint*: You may use the observation-id to your advantage for that purpose, or just select targets from your catalogue in a circular area around the central ra and dec.
+
+After you have done so, you may simply run the `0_target_file_construction.ipynb` notebook to fully generate the `.fld` file for your observation.
 
 ## Alternative approaches
 

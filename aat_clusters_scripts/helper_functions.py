@@ -1,11 +1,11 @@
 
 import warnings
-from typing import Optional, Sequence
+from typing import Literal, Optional
 
 import astropy.units as u
 import numpy as np
 from astropy.coordinates import SkyCoord
-from astropy.table import Table
+from astropy.table import Table, unique
 from IPython.display import HTML, display
 
 
@@ -43,6 +43,19 @@ def convert_radec_to_hmsdms(ra: float, dec: float,
 
 
 def add_ra_dec_hms_dms_columns(table: Table) -> Table:
+    """Adds 'ra_hms' and 'dec_dms' columns to a table with 'ra' and 'dec' columns
+    which are assumed to be in degrees.
+
+    Parameters
+    ----------
+    table : Table
+        The input table with a ra and a dec column in degrees
+
+    Returns
+    -------
+    Table
+        The input table with two additional columns (ra_hms, dec_dms)
+    """
     hms_dms = np.array([convert_radec_to_hmsdms(
         member["ra"], member["dec"], delimiter=" ", precision=2) for member in table])
     table["ra_hms"] = hms_dms[:, 0]
@@ -118,22 +131,10 @@ def filter_for_existing_cols(object_table: Table, cols=("rmag", "pmra", "pmdec")
     Table
         A subset of `object_table` where all entries in the given columns are available.
     """
-    # We take the intersection of the non-zero indices of each of the columns:
-    mask = True
+    # We take the intersection of all not-nan entries of each of the columns:
+    mask = True  # initialise so we can easily add to it.
     for col in cols:
         mask &= ~np.isnan(object_table[col])
-    # mask = ~np.isnan(object_table[col]) for col in cols))
-    # print(~np.isnan(object_table["rmag"]))
-    # print(object_table)
-    return object_table[mask]
-
-
-def filter_for_stars(object_table: Table, more_star_names: Optional[Sequence[str]] = None):
-    star_list = ["*", "HB*", "Ae*", "Em*", "Be*", "BS*",
-                 "RG*", "AB*", "C*", "S*", "sg*", "s*r", "s*y", "HS*"]
-    if more_star_names is not None:
-        star_list += list(more_star_names)
-    mask = np.isin(object_table["otype_opt"], star_list)
     return object_table[mask]
 
 
@@ -142,7 +143,73 @@ def calc_pm_tot(pmra: float, pmdec: float) -> float:
     return np.sqrt((0.3977 * pmra)**2 + pmdec**2)
 
 
-def display_html_site(url: str, width: float = 800, height: float = 600, provide_link: bool = False,
+#######################################
+# - Putting the tables into a unified form:
+
+@np.vectorize
+def _clean_object_name(name: str) -> str:
+    if isinstance(name, bytes):
+        name = name.decode("utf-8")
+    return name.replace(" ", "_")
+
+
+def reduce_table_to_relevant_columns_and_remove_duplicates(table: Table, keep_old_radec=False) -> Table:
+    """Reduces the given table to the relevant columns and removes duplicates in
+    in the `obj_name` column."""
+    relevant_cols = ["obj_name", "ra_hms", "dec_dms", "obs_type",
+                     "priority", "rmag", "program_id", "pmra", "pmdec"]
+    if keep_old_radec:
+        relevant_cols += ["ra", "dec"]
+    if (diff := len(table) - len(np.unique(table["obj_name"]))) > 0:
+        # TODO: Find the problematic sources and print them directly
+        warnings.warn(
+            f"Discarding {diff} sources that do not have unique names. You might want to check on that.")
+        table = unique(table, "obj_name")
+    table.sort("obj_name")
+    return table[relevant_cols]
+
+
+def sanitize_table_for_observation(table, obs_type: Literal["P", "S", "F"], priority=9) -> Table:
+    """Performs cleaning operations on the given table, putting it into a format
+    that can be used in the .fdl files.
+
+    Parameters
+    ----------
+    table : Table
+        An astropy table expected to have [ra, dec, obj_name, rmag, pmra, pmdec]
+        columns.
+    obs_type : Literal[P, S, F]
+        P = 'Science targets' (and WDs), F = 'Guide stars', S = 'Sky fibres'
+    priority : int, optional
+        The priority the sources in the table should have [9 is highest], by default 9
+
+    Returns
+    -------
+    Table
+        A cleaned table containing only unique sources
+    """
+    assert obs_type in "PSF", f"Please choose a valid observation type and not {obs_type}"
+    assert set(table.colnames).issuperset({"ra", "dec", "obj_name", "rmag", "pmra", "pmdec"}
+                                          ), "The table provided for sanitising does not have the required columns (maybe you need to change the names?)."
+    table["obj_name"] = _clean_object_name(table["obj_name"])
+    table["obs_type"] = obs_type
+    table["priority"] = priority
+    # The program ID does not matter for us, but we need to provide it
+    table["program_id"] = 0
+    table = add_ra_dec_hms_dms_columns(table)
+    # Convert proper motions from mas/yr to arcsec/yr
+    table["pmra"] = table["pmra"] / 1000.
+    table["pmdec"] = table["pmdec"] / 1000.
+    table = reduce_table_to_relevant_columns_and_remove_duplicates(
+        table, keep_old_radec=True)
+    return table
+
+########################################################
+# - HTML stuff (just for display purposes)
+
+
+def display_html_site(url: str, width: float = 800,
+                      height: float = 600, provide_link: bool = False,
                       additional_text=""):
     """Displays the given url in the jupyter notebook
 
