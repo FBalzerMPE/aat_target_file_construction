@@ -1,3 +1,4 @@
+from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,7 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table, unique, vstack
 from astropy.utils.metadata import MergeConflictWarning
 from matplotlib.axes import Axes
+
 
 from .helper_functions import (
     calc_pm_tot, convert_radec_to_hmsdms, filter_for_existing_cols,
@@ -161,6 +163,22 @@ class TargetContainer:
 
     def __len__(self):
         return sum([len(t) for t in self.get_available_tables().values()])
+
+    @classmethod
+    def from_existing_fld_file(cls, filename: Path) -> TargetContainer:
+        """Create an instance of a TargetContainer from an existing .fld file.
+
+        Parameters
+        ----------
+        filename : Path
+            The Path to the .fld file [expected to be in the same format as written by this container]
+
+        Returns
+        -------
+        TargetContainer
+        """
+        table = Table.read(filename, format="csv")
+        return cls(table["ra"].min(), table["ra"].max(), table["dec"].min(), table["dec"].max())
 
     def get_available_tables(self) -> dict[str, Table]:
         """Get all of the currently available tables."""
@@ -395,5 +413,6 @@ class TargetContainer:
             f.write(header + "".join(content[1:]))
         if verbose:
             self.pprint()
+
             print(
-                f"Successfully written the .fld file to {fpath} with the following header:\n{header}")
+                f"Successfully written the .fld file to {fpath} with the following header [cut after 50 characters]:\n{header[:50]}")
