@@ -3,19 +3,19 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional, Sequence
+from typing import Optional, Sequence
 
 import astropy.units as u
 import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
-from astropy.table import Table, unique, vstack
+from astropy.table import Table, vstack
 from astropy.utils.metadata import MergeConflictWarning
 from matplotlib.axes import Axes
 
 from .helper_functions import (
-    RELEVANT_TABLE_COLUMNS, calc_pm_tot, convert_radec_to_hmsdms,
-    filter_for_existing_cols, get_legacysurvey_url,
+    RELEVANT_TABLE_COLUMNS, add_ra_dec_degree_columns, calc_pm_tot,
+    convert_radec_to_hmsdms, filter_for_existing_cols, get_legacysurvey_url,
     get_objects_in_circular_region, read_obs_parameters_from_fld_file,
     reduce_table_to_relevant_columns_and_remove_duplicates,
     sanitize_table_for_observation)
@@ -169,6 +169,7 @@ class TargetContainer:
     @classmethod
     def from_existing_fld_file(cls, fpath: Path) -> TargetContainer:
         """Create an instance of a TargetContainer from an existing .fld file.
+        Warning: This cannot infer the selection radius and will just default it to 1.
 
         Parameters
         ----------
@@ -182,7 +183,8 @@ class TargetContainer:
         # Unfortunately we need pandas to properly handle the input
         table = pd.read_csv(fpath, delimiter="\t", skiprows=8,
                             comment="#", names=RELEVANT_TABLE_COLUMNS)
-        Table.from_pandas(table)
+        table = Table.from_pandas(table)
+        table = add_ra_dec_degree_columns(table)
         science_targets = table[table["obs_type"] == "P"]
         is_white_dwarf = np.array(
             ["WDJ" in name for name in science_targets["obj_name"]])
@@ -361,6 +363,19 @@ class TargetContainer:
         print(info_string)
 
     def plot_sources_on_ax(self, ax: Axes, types: Optional[Sequence[str]] = None, **kwargs):
+        """Construct a positional scatter plot of the sources on the given ax, labelled by
+        their affiliation.
+
+        Parameters
+        ----------
+        ax : Axes
+            The matplotlib ax object to perform the plot on
+        types : Optional[Sequence[str]], optional
+            The types to plot (e.g. science_targets, white_dwarfs, sky_fibres, guide_stars).
+            If not provided, all types are plotted., by default None
+        **kwargs :
+            Keyword arguments additionally handed to the scatter plot routine.
+        """
         labels = self.get_available_tables().keys()
         if types is not None:
             labels = [label for label in labels if label in types]
@@ -386,7 +401,19 @@ class TargetContainer:
         for key, table in self.get_available_tables().items():
             print(f"\t{key:18}-> {len(table)} sources")
 
-    def get_full_target_table(self):
+    def get_full_target_table(self) -> Table:
+        """Constructs a full target table from all available subtables.
+
+        Returns
+        -------
+        Table
+            The full target table
+
+        Raises
+        ------
+        UserWarning
+            If not all tables are available, this warning will be raised.
+        """
         if len((keys := self.get_available_tables().keys())) < 4:
             diff = 4 - len(keys)
             raise UserWarning(f"You are missing {diff} tables.\n"
@@ -400,7 +427,21 @@ class TargetContainer:
             full_table)
         return full_table
 
-    def get_fld_file_header(self, observation_utdate: str, observation_label: Optional[str] = None) -> str:
+    def get_fld_file_header(self, observation_utdate: str,
+                            observation_label: Optional[str] = None) -> str:
+        """Generate the file header for the .fld file.
+
+        Parameters
+        ----------
+        observation_utdate : str
+            The date of the observation in the YYYY MM DD format
+        observation_label : str, optional, by default None
+            The label for the observation. If not provided, the observation id is used (recommended)
+
+        Returns
+        -------
+        str
+            The label for the fld file."""
         label = f"Observation {self.observation_id}" if observation_label is None else observation_label
         ra, dec = convert_radec_to_hmsdms(
             self.obs_ra, self.obs_dec, " ", precision=2)
@@ -413,7 +454,23 @@ class TargetContainer:
 # Name 			  hh  mm ss.sss  dd  mm ss.sss 		      mag     ID      ra	dec\n""")
         return file_header
 
-    def write_targets_to_disc(self, observation_utdate: str, fpath: Optional[Path] = None, overwrite=True, verbose=False):
+    def write_targets_to_disc(self, observation_utdate: str, fpath: Optional[Path] = None,
+                              overwrite=True, verbose=False):
+        """Constructs the final target table and writes them to disc.
+
+        Parameters
+        ----------
+        observation_utdate : str
+            The date of the observation in the YYYY MM DD format
+        fpath : Optional[Path], optional
+            The filepath where the data should be stored. If not provided,
+            the default location for the observation id is used (recommended), by default None
+        overwrite : bool, optional
+            Whether an existing .fld file in the specified location should be
+            overwritten, by default True
+        verbose : bool, optional
+            Whether additional information should be printed., by default False
+        """
         if fpath is None:
             fpath = PATHS.get_fld_fname(self.observation_id)
         all_targets = self.get_full_target_table()

@@ -9,14 +9,16 @@ def set_up_directories():
     """Set up the directories (i. e. a nested data- and plotting directory)
     that are necessary for the scripts to work.
     """
-    # TODO: Find Path where aat_clusters_scripts lives in
-    # TODO: Then, create data/plots/ and dataobservation_preparation/sweep
-    # TODO: The sweep directory should only be created if SWEEP_FILEPATH is not an environment variable
-    # TODO: Then, perform checks on the required files and instruct user provide them (and notify for incoming SWEEP download)
-    pass
+    run_dir = Path(os.getcwd())
+    for subpath in ["data/observation_setup/", "data/plots"]:
+        run_dir.joinpath(subpath).mkdir(parents=True, exist_ok=True)
+    PATHS.sweep.mkdir(exist_ok=True)
+    print("Successfully set up the necessary filepaths.")
+    print(
+        f"WARNING: The potentially big SWEEP files will be downloaded to {PATHS.sweep}.")
 
 
 def check_successful_setup():
-    # TODO: Check availability of all files.
     assert (p := PATHS.white_dwarfs_jacob).is_file(), (
         f"Please download the White Dwarf file and deposit it at {p}")
+    # You might want to assess whether your observation targets are available as well.

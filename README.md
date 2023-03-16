@@ -17,11 +17,17 @@ Feel free to adapt it to your own observations; I tried to specify the points th
 I provide one (in the future maybe two) handles to run this program:
 
 - A jupiter notebook [recommended] that includes the setup and all the steps described below.
-- <s>A command-line script that can be invoked [not yet, still have to implement it, sorry]</s>
+- <s>A command-line script that can be invoked [not yet tested and only preliminary, sorry]</s>
+
+These handles both include a setup routine to automatically generate a data and a plot directory relative to the directory of where the code is run.
 
 ### :exclamation: Requirements
 
-For this script to work, the following packages need to be installed:
+For this script to work some requirements need to be met first:
+
+#### Packages
+
+The following packages need to be installed:
 
 - `astropy`
 - [`astroquery` (only necessary if you want to do Simbad or Gaia queries, see the 'unused functions.py' script for more information)]
@@ -29,6 +35,21 @@ For this script to work, the following packages need to be installed:
 - Sufficiently large space on disk to save the downloaded SWEEP files (~2 GB/observation)
   
 Also, a python version $>$ 3.9 is recommended, but not entirely necessary (with earlier versions, you might need to replace some types in the type hints with imports from the `typing` module, e. g. replace `tuple[str, str]` with `Tuple[str, str]` and include `from typing import Tuple` in the header.)
+
+#### Space requirements
+
+In addition to the python packages, the script will download necessary LS DR 10 sweep files!\
+These can take up space of a few GB. If you want a custom directory, please set up a `SWEEP_PATH` environment variable (simply add
+
+```
+export SWEEP_PATH="your_filepath"
+```
+
+to your `.bashrc` (or equivalent setup of environment variables on other OS) for the files  to be saved to and retrieved from this specified path).
+
+#### Other
+
+The white dwarf file needs to be available and downloaded to the specified path.
 
 ## :telescope: Description of a single-observation setup
 

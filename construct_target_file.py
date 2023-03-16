@@ -47,6 +47,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    acs.set_up_directories()
+    acs.check_successful_setup()
     container = acs.TargetContainer(args.observation_id, args.ra, args.dec)
     container.get_science_targets(verbose=args.verbose)
     container.get_white_dwarfs(verbose=args.verbose)

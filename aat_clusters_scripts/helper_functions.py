@@ -74,6 +74,27 @@ def add_ra_dec_hms_dms_columns(table: Table) -> Table:
     return table
 
 
+def add_ra_dec_degree_columns(table: Table) -> Table:
+    """Adds 'ra' and 'dec' columns to a table with 'ra_hms' and 'dec_dms' columns
+    which are assumed to be in hms dms format
+
+    Parameters
+    ----------
+    table : Table
+        The input table with a ra_hms and a dec_dms column in degrees
+
+    Returns
+    -------
+    Table
+        The input table with two additional columns (ra, dec)
+    """
+    ra_dec_deg = np.array([convert_radec_to_degree(
+        member["ra_hms"], member["dec_dms"]) for member in table])
+    table["ra"] = ra_dec_deg[:, 0]
+    table["dec"] = ra_dec_deg[:, 1]
+    return table
+
+
 def get_legacysurvey_url(ra_cen: float, dec_cen: float, mark: bool = True,
                          zoom_factor=14, layer="ls-dr10") -> str:
     """Returns the URL to a LS10 viewer.
@@ -273,7 +294,8 @@ def read_obs_parameters_from_fld_file(fpath: Path) -> tuple[int, float, float]:
             if line.startswith("LABEL"):
                 obs_id = line.split()[-1]
             if line.startswith("CENTRE"):
+                centre_line = line
                 break
-    centre = line.split()[1:]
+    centre = centre_line.split()[1:]
     ra, dec = ":".join(centre[:3]), ":".join(centre[3:])
     return obs_id, *convert_radec_to_degree(ra, dec)
