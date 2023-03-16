@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,15 +7,16 @@ from typing import Literal, Optional, Sequence
 
 import astropy.units as u
 import numpy as np
+import pandas as pd
 from astropy.coordinates import SkyCoord
 from astropy.table import Table, unique, vstack
 from astropy.utils.metadata import MergeConflictWarning
 from matplotlib.axes import Axes
 
-
 from .helper_functions import (
-    calc_pm_tot, convert_radec_to_hmsdms, filter_for_existing_cols,
-    get_legacysurvey_url, get_objects_in_circular_region,
+    RELEVANT_TABLE_COLUMNS, calc_pm_tot, convert_radec_to_hmsdms,
+    filter_for_existing_cols, get_legacysurvey_url,
+    get_objects_in_circular_region, read_obs_parameters_from_fld_file,
     reduce_table_to_relevant_columns_and_remove_duplicates,
     sanitize_table_for_observation)
 from .load_science_targets import get_science_targets
@@ -165,20 +167,32 @@ class TargetContainer:
         return sum([len(t) for t in self.get_available_tables().values()])
 
     @classmethod
-    def from_existing_fld_file(cls, filename: Path) -> TargetContainer:
+    def from_existing_fld_file(cls, fpath: Path) -> TargetContainer:
         """Create an instance of a TargetContainer from an existing .fld file.
 
         Parameters
         ----------
-        filename : Path
+        fpath : Path
             The Path to the .fld file [expected to be in the same format as written by this container]
 
         Returns
         -------
         TargetContainer
         """
-        table = Table.read(filename, format="csv")
-        return cls(table["ra"].min(), table["ra"].max(), table["dec"].min(), table["dec"].max())
+        # Unfortunately we need pandas to properly handle the input
+        table = pd.read_csv(fpath, delimiter="\t", skiprows=8,
+                            comment="#", names=RELEVANT_TABLE_COLUMNS)
+        Table.from_pandas(table)
+        science_targets = table[table["obs_type"] == "P"]
+        is_white_dwarf = np.array(
+            ["WDJ" in name for name in science_targets["obj_name"]])
+        obs_id, ra, dec = read_obs_parameters_from_fld_file(fpath)
+        container = cls(obs_id, ra, dec)
+        container.white_dwarfs = science_targets[is_white_dwarf]
+        container.science_targets = science_targets[~is_white_dwarf]
+        container.sky_fibres = table[table["obs_type"] == "S"]
+        container.guide_stars = table[table["obs_type"] == "F"]
+        return container
 
     def get_available_tables(self) -> dict[str, Table]:
         """Get all of the currently available tables."""

@@ -1,5 +1,6 @@
 
 import warnings
+from pathlib import Path
 from typing import Literal, Optional
 
 import astropy.units as u
@@ -7,6 +8,10 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.table import Table, unique
 from IPython.display import HTML, display
+
+# Register the table columns for the final .fld file
+RELEVANT_TABLE_COLUMNS = ("obj_name", "ra_hms", "dec_dms", "obs_type",
+                          "priority", "rmag", "program_id", "pmra", "pmdec")
 
 
 def convert_radec_to_hmsdms(ra: float, dec: float,
@@ -40,6 +45,12 @@ def convert_radec_to_hmsdms(ra: float, dec: float,
     hms, dms = [s.replace("d", delimiter).replace(
         "h", delimiter).replace("m", delimiter).replace("s", "") for s in (hms, dms)]
     return hms, dms
+
+
+def convert_radec_to_degree(ra_hms: str, dec_dms: str) -> tuple[float, float]:
+    """Calculate the ra and dec in degree given their representation in hms and dms."""
+    skycoord = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.degree))
+    return skycoord.ra.value, skycoord.dec.value
 
 
 def add_ra_dec_hms_dms_columns(table: Table) -> Table:
@@ -156,8 +167,7 @@ def _clean_object_name(name: str) -> str:
 def reduce_table_to_relevant_columns_and_remove_duplicates(table: Table, keep_old_radec=False) -> Table:
     """Reduces the given table to the relevant columns and removes duplicates in
     in the `obj_name` column."""
-    relevant_cols = ["obj_name", "ra_hms", "dec_dms", "obs_type",
-                     "priority", "rmag", "program_id", "pmra", "pmdec"]
+    relevant_cols = list(RELEVANT_TABLE_COLUMNS)
     if keep_old_radec:
         relevant_cols += ["ra", "dec"]
     if (diff := len(table) - len(np.unique(table["obj_name"]))) > 0:
@@ -254,3 +264,16 @@ def _get_html_image_string(source: str, width: float = 600, height: float = 600)
     tag = "iframe" if is_url else "img"
     width_height = f' width="{width}" height="{height}"' if is_url else f' width="{width}"'
     return f'<{tag} src="{source}"{width_height}></{tag}>'
+
+
+def read_obs_parameters_from_fld_file(fpath: Path) -> tuple[int, float, float]:
+    """Read the observation id and the ra and dec from the given fld file."""
+    with fpath.open() as f:
+        for line in f.readlines():
+            if line.startswith("LABEL"):
+                obs_id = line.split()[-1]
+            if line.startswith("CENTRE"):
+                break
+    centre = line.split()[1:]
+    ra, dec = ":".join(centre[:3]), ":".join(centre[3:])
+    return obs_id, *convert_radec_to_degree(ra, dec)
