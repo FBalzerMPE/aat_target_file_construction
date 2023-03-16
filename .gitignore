@@ -163,3 +163,5 @@ cython_debug/
 # We do not want to track the data and the files received from Jacob:
 data/*
 from_jacob/*
+# The following file is only relevant for myself:
+1_data_analysis.ipynb
