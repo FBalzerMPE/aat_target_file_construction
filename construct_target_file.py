@@ -52,7 +52,7 @@ def main():
     container = acs.TargetContainer(args.observation_id, args.ra, args.dec)
     container.get_science_targets(verbose=args.verbose)
     container.get_white_dwarfs(verbose=args.verbose)
-    container.get_guide_stars(verbose=args.verbose)
+    container.get_guide_stars(14, 14.5, 50, verbose=args.verbose)
     container.get_sky_fibres(verbose=args.verbose)
     ut_date = args.utdate if args.utdate is not None else "YYYY MM DD, to be replaced"
     container.write_targets_to_disc(ut_date, verbose=args.verbose)
@@ -61,4 +61,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print("WARNING: This code has not been properly tested.\nRemaining action items are to implement checks and defaults for the magnitude ranges of guide stars, and setting other parameters.\nI recomment to use the 0_target_file_construction.ipynb jupyter notebook.")
     main()
