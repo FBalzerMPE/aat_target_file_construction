@@ -153,3 +153,9 @@ For the sky fibres,the procedure in `skyfibrefromJacobfile3.py` could also be em
 - First, we load the general fibre file only containing their ra and dec.
 - Again, we make sure to select only fibres in a `1 degree` range of the observational centre.
 - We pretend that each of them has an `rmag` of 30 and no proper motion.
+
+## Acknowledgements
+
+This pipeline makes use of the data of the Legacy Surveys (to obtain SkyFibres and Guide Stars), please see [here](https://www.legacysurvey.org/acknowledgment/) for their acknowledgement rules.\
+The White Dwarf file had been provided to me by Mara Salvato.\
+This code is distributed under the MIT license (see also `LICENSE.txt`), you are allowed to freely use and modify it under the condition of having to mention its origin.
